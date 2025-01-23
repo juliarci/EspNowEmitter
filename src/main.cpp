@@ -1,79 +1,157 @@
 /*********
-  Rui Santos & Sara Santos - Random Nerd Tutorials
-  Complete project details at https://RandomNerdTutorials.com/esp-now-many-to-one-esp32/
-  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.
-  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+  Rui Santos
+  Complete project details at https://randomnerdtutorials.com  
 *********/
-#include <esp_now.h>
+
 #include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include "../../EspNowReceiver/.pio/libdeps/firebeetle32/PubSubClient/src/PubSubClient.h"
 
-// REPLACE WITH THE RECEIVER'S MAC Address
-uint8_t broadcastAddress[] = { 0xec, 0x62, 0x60, 0x5a, 0x51, 0x88 };
+// Replace the next variables with your SSID/Password combination
+const char* ssid = "iot";
+const char* password = "iotisis;";
 
-// Structure example to send data
-// Must match the receiver structure
-typedef struct struct_message {
-    int id; // must be unique for each sender board
-    int x;
-    int y;
-} struct_message;
+// Add your MQTT Broker IP address, example:
+//const char* mqtt_server = "192.168.1.144";
+const char* mqtt_server = "192.168.3.151";
 
-// Create a struct_message called myData
-struct_message myData;
+WiFiClient espClient;
+PubSubClient client(espClient);
+long lastMsg = 0;
+char msg[50];
+int value = 0;
 
-// Create peer interface
-esp_now_peer_info_t peerInfo;
+//uncomment the following lines if you're using SPI
+/*#include <SPI.h>
+#define BME_SCK 18
+#define BME_MISO 19
+#define BME_MOSI 23
+#define BME_CS 5*/
 
-// callback when data is sent
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("\r\nLast Packet Send Status:\t");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
-}
- 
+//Adafruit_BME280 bme; // I2C
+//Adafruit_BME280 bme(BME_CS); // hardware SPI
+//Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK); // software SPI
+float temperature = 0;
+float humidity = 0;
+
+// LED Pin
+const int ledPin = 4;
+void setup_wifi();
+
 void setup() {
-  // Init Serial Monitor
   Serial.begin(115200);
+  // default settings
+  // (you can also pass in a Wire library object like &Wire2)
+  //status = bme.begin();  
+  //if (!bme.begin(0x76)) {
+   // Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    //while (1);
+  //}
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  //client.setCallback(callback);
 
-  // Set device as a Wi-Fi Station
-  WiFi.mode(WIFI_STA);
+  pinMode(ledPin, OUTPUT);
+}
 
-  // Init ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
-    return;
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
 
-  // Once ESPNow is successfully Init, we will register for Send CB to
-  // get the status of Trasnmitted packet
-  esp_now_register_send_cb(OnDataSent);
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* message, unsigned int length) {
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
   
-  // Register peer
-  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
-  peerInfo.channel = 0;  
-  peerInfo.encrypt = false;
-  
-  // Add peer        
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
-    return;
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  // Feel free to add more if statements to control more GPIOs with MQTT
+
+  // If a message is received on the topic esp32/output, you check if the message is either "on" or "off". 
+  // Changes the output state according to the message
+  if (String(topic) == "esp32/output") {
+    Serial.print("Changing output to ");
+    if(messageTemp == "on"){
+      Serial.println("on");
+      digitalWrite(ledPin, HIGH);
+    }
+    else if(messageTemp == "off"){
+      Serial.println("off");
+      digitalWrite(ledPin, LOW);
+    }
   }
 }
- 
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");
+      // Subscribe
+      client.subscribe("esp32/output");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
 void loop() {
-  // Set values to send
-  myData.id = 1;
-  myData.x = random(0,50);
-  myData.y = random(0,50);
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
 
-  // Send message via ESP-NOW
-  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
-   
-  if (result == ESP_OK) {
-    Serial.println("Sent with success");
+  long now = millis();
+  if (now - lastMsg > 5000) {
+    lastMsg = now;
+    
+    // Temperature in Celsius
+    temperature = rand() % 40;   
+    // Uncomment the next line to set temperature in Fahrenheit 
+    // (and comment the previous temperature line)
+    //temperature = 1.8 * bme.readTemperature() + 32; // Temperature in Fahrenheit
+    
+    // Convert the value to a char array
+    char tempString[8];
+    dtostrf(temperature, 1, 2, tempString);
+    Serial.print("Temperature: ");
+    Serial.println(tempString);
+    client.publish("esp32/temperature", tempString);
+
+    humidity = rand() % 100;
+    
+    // Convert the value to a char array
+    char humString[8];
+    dtostrf(humidity, 1, 2, humString);
+    Serial.print("Humidity: ");
+    Serial.println(humString);
+    client.publish("esp32/humidity", humString);
   }
-  else {
-    Serial.println("Error sending the data");
-  }
-  delay(10000);
 }
-
