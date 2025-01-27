@@ -7,6 +7,15 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include "../../EspNowReceiver/.pio/libdeps/firebeetle32/PubSubClient/src/PubSubClient.h"
+#include <DHT.h>
+#include <DHT_U.h>
+#include <Ultrasonic.h>
+
+
+#define DHTPIN 25   // GPIO connecté au capteur DHT
+#define DHTTYPE DHT22  // Remplacez par DHT11 si nécessaire
+#define ULTRAPIN 13
+DHT dht(DHTPIN, DHTTYPE);
 
 // Replace the next variables with your SSID/Password combination
 const char* ssid = "iot";
@@ -16,43 +25,23 @@ const char* password = "iotisis;";
 //const char* mqtt_server = "192.168.1.144";
 const char* mqtt_server = "192.168.3.151";
 
+Ultrasonic ultrasonic(ULTRAPIN);
 WiFiClient espClient;
 PubSubClient client(espClient);
 long lastMsg = 0;
 char msg[50];
 int value = 0;
 
-//uncomment the following lines if you're using SPI
-/*#include <SPI.h>
-#define BME_SCK 18
-#define BME_MISO 19
-#define BME_MOSI 23
-#define BME_CS 5*/
-
-//Adafruit_BME280 bme; // I2C
-//Adafruit_BME280 bme(BME_CS); // hardware SPI
-//Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK); // software SPI
 float temperature = 0;
 float humidity = 0;
 
-// LED Pin
-const int ledPin = 4;
 void setup_wifi();
 
 void setup() {
   Serial.begin(115200);
-  // default settings
-  // (you can also pass in a Wire library object like &Wire2)
-  //status = bme.begin();  
-  //if (!bme.begin(0x76)) {
-   // Serial.println("Could not find a valid BME280 sensor, check wiring!");
-    //while (1);
-  //}
   setup_wifi();
+  dht.begin();
   client.setServer(mqtt_server, 1883);
-  //client.setCallback(callback);
-
-  pinMode(ledPin, OUTPUT);
 }
 
 void setup_wifi() {
@@ -63,7 +52,6 @@ void setup_wifi() {
   Serial.println(ssid);
 
   WiFi.begin(ssid, password);
-
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -95,11 +83,9 @@ void callback(char* topic, byte* message, unsigned int length) {
     Serial.print("Changing output to ");
     if(messageTemp == "on"){
       Serial.println("on");
-      digitalWrite(ledPin, HIGH);
     }
     else if(messageTemp == "off"){
       Serial.println("off");
-      digitalWrite(ledPin, LOW);
     }
   }
 }
@@ -122,6 +108,7 @@ void reconnect() {
     }
   }
 }
+
 void loop() {
   if (!client.connected()) {
     reconnect();
@@ -131,27 +118,41 @@ void loop() {
   long now = millis();
   if (now - lastMsg > 5000) {
     lastMsg = now;
-    
-    // Temperature in Celsius
-    temperature = rand() % 40;   
-    // Uncomment the next line to set temperature in Fahrenheit 
-    // (and comment the previous temperature line)
-    //temperature = 1.8 * bme.readTemperature() + 32; // Temperature in Fahrenheit
-    
-    // Convert the value to a char array
+
+    // Lecture des données du capteur DHT
+    float temperature = dht.readTemperature(); // Celsius
+    float humidity = dht.readHumidity();
+
+    // Vérifier si les valeurs sont valides
+    if (isnan(temperature) || isnan(humidity)) {
+      Serial.println("Échec de la lecture du capteur DHT !");
+      return;
+    }
+
+    // Conversion et publication
     char tempString[8];
     dtostrf(temperature, 1, 2, tempString);
     Serial.print("Temperature: ");
     Serial.println(tempString);
     client.publish("esp32/temperature", tempString);
 
-    humidity = rand() % 100;
-    
-    // Convert the value to a char array
     char humString[8];
     dtostrf(humidity, 1, 2, humString);
     Serial.print("Humidity: ");
     Serial.println(humString);
     client.publish("esp32/humidity", humString);
+
+    long RangeInInches;
+    long RangeInCentimeters;
+
+    Serial.println("The distance to obstacles in front is: ");
+
+    RangeInCentimeters = ultrasonic.MeasureInCentimeters(); // two measurements should keep an interval
+    Serial.println("Distance :");
+    Serial.print(RangeInCentimeters);//0~400cm
+    Serial.println(" cm");
+  delay(250);
+
+
   }
 }
