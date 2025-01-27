@@ -1,158 +1,175 @@
 /*********
-  Rui Santos
-  Complete project details at https://randomnerdtutorials.com  
+  Rui Santos - Random Nerd Tutorials
+  Complete project details at https://RandomNerdTutorials.com/
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.
+   - adapted by A.Combes ISIS 26.1.2025
 *********/
 
 #include <WiFi.h>
-#include <Wire.h>
+#include <esp_now.h>
 #include <Adafruit_Sensor.h>
-#include "../../EspNowReceiver/.pio/libdeps/firebeetle32/PubSubClient/src/PubSubClient.h"
 #include <DHT.h>
 #include <DHT_U.h>
 #include <Ultrasonic.h>
 
-
-#define DHTPIN 25   // GPIO connecté au capteur DHT
-#define DHTTYPE DHT22  // Remplacez par DHT11 si nécessaire
+// Définition des broches
+#define DHTPIN 25
+#define DHTTYPE DHT22
 #define ULTRAPIN 13
+#define BOARD_ID 0
+
+// Déclaration des objets capteurs
 DHT dht(DHTPIN, DHTTYPE);
-
-// Replace the next variables with your SSID/Password combination
-const char* ssid = "iot";
-const char* password = "iotisis;";
-
-// Add your MQTT Broker IP address, example:
-//const char* mqtt_server = "192.168.1.144";
-const char* mqtt_server = "192.168.3.151";
-
 Ultrasonic ultrasonic(ULTRAPIN);
-WiFiClient espClient;
-PubSubClient client(espClient);
-long lastMsg = 0;
-char msg[50];
-int value = 0;
 
-float temperature = 0;
-float humidity = 0;
+// Adresse MAC du Sink
+uint8_t broadcastAddress[] = {0xec, 0x62, 0x60, 0x5a, 0x45, 0xa0};
+esp_now_peer_info_t peerInfo;
 
-void setup_wifi();
+// Structure pour l'échange des données : Mote -> Sink
+typedef struct struct_mote2sinkMessage {
+  int boardId;
+  int readingId;
+  int timeTag;
+  float temperature;
+  float humidity;
+  float distance;
+  char text[64];
+} struct_mote2sinkMessage;
 
+struct_mote2sinkMessage espNow_moteData;
+
+// Structure pour l'échange des données : Sink -> Mote
+typedef struct struct_sink2moteMessage {
+  int boardId;
+  bool bool0;
+  char text[64];
+} struct_sink2moteMessage;
+
+struct_sink2moteMessage espNow_incomingMessage;
+
+// Variables pour la gestion du temps
+unsigned long previousMillis = 0;
+const long interval = 2000;
+unsigned int readingId = 0;
+
+// ================================================================================================
+// Fonction de lecture des capteurs
+
+float readDHTTemperature() {
+  float temperature = dht.readTemperature();
+  if (isnan(temperature)) {
+    Serial.println("Erreur de lecture du capteur DHT (température)");
+    return 0;
+  }
+  return temperature;
+}
+
+float readDHTHumidity() {
+  float humidity = dht.readHumidity();
+  if (isnan(humidity)) {
+    Serial.println("Erreur de lecture du capteur DHT (humidité)");
+    return 0;
+  }
+  return humidity;
+}
+
+float readUltrasonicDistance() {
+  long distance = ultrasonic.MeasureInCentimeters();
+  if (distance <= 0) {
+    Serial.println("Erreur de lecture du capteur ultrasonique");
+    return 0;
+  }
+  return (float)distance;
+}
+
+// ================================================================================================
+// Callback pour la réception des données (Sink -> Mote)
+void espNowOnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
+  memcpy(&espNow_incomingMessage, incomingData, sizeof(espNow_incomingMessage));
+  Serial.println("Données reçues depuis le Sink:");
+  Serial.print("Board ID: ");
+  Serial.println(espNow_incomingMessage.boardId);
+  Serial.print("Message: ");
+  Serial.println(espNow_incomingMessage.text);
+}
+
+// Callback pour l'envoi des données (Mote -> Sink)
+void espNowOnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("Statut d'envoi : ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Succès" : "Échec");
+}
+
+// ================================================================================================
+// Configuration initiale
 void setup() {
   Serial.begin(115200);
-  setup_wifi();
+
+  // Initialisation des capteurs
   dht.begin();
-  client.setServer(mqtt_server, 1883);
-}
 
-void setup_wifi() {
-  delay(10);
-  // We start by connecting to a WiFi network
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
+  // Configuration WiFi
+  WiFi.mode(WIFI_STA);
+  Serial.print("Adresse MAC : ");
+  Serial.println(WiFi.macAddress());
 
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // Initialisation ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Erreur d'initialisation ESP-NOW");
+    return;
   }
 
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
-}
+  // Enregistrement des callbacks
+  esp_now_register_send_cb(espNowOnDataSent);
+  esp_now_register_recv_cb(espNowOnDataRecv);
 
-void callback(char* topic, byte* message, unsigned int length) {
-  Serial.print("Message arrived on topic: ");
-  Serial.print(topic);
-  Serial.print(". Message: ");
-  String messageTemp;
-  
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)message[i]);
-    messageTemp += (char)message[i];
-  }
-  Serial.println();
+  // Configuration du Sink comme pair
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
 
-  // Feel free to add more if statements to control more GPIOs with MQTT
-
-  // If a message is received on the topic esp32/output, you check if the message is either "on" or "off". 
-  // Changes the output state according to the message
-  if (String(topic) == "esp32/output") {
-    Serial.print("Changing output to ");
-    if(messageTemp == "on"){
-      Serial.println("on");
-    }
-    else if(messageTemp == "off"){
-      Serial.println("off");
-    }
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Erreur d'ajout du Sink");
+    return;
   }
 }
 
-void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Attempt to connect
-    if (client.connect("ESP8266Client")) {
-      Serial.println("connected");
-      // Subscribe
-      client.subscribe("esp32/output");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
-
+// ================================================================================================
+// Boucle principale
 void loop() {
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop();
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
 
-  long now = millis();
-  if (now - lastMsg > 5000) {
-    lastMsg = now;
+    // Lecture des capteurs
+    float temperature = readDHTTemperature();
+    float humidity = readDHTHumidity();
+    float distance = readUltrasonicDistance();
 
-    // Lecture des données du capteur DHT
-    float temperature = dht.readTemperature(); // Celsius
-    float humidity = dht.readHumidity();
+    // Préparation des données à envoyer
+    espNow_moteData.boardId = BOARD_ID;
+    espNow_moteData.readingId = readingId++;
+    espNow_moteData.timeTag = currentMillis;
+    espNow_moteData.temperature = temperature;
+    espNow_moteData.humidity = humidity;
+    espNow_moteData.distance = distance;
+    snprintf(espNow_moteData.text, sizeof(espNow_moteData.text), "Données de la board %d envoyées", BOARD_ID);
 
-    // Vérifier si les valeurs sont valides
-    if (isnan(temperature) || isnan(humidity)) {
-      Serial.println("Échec de la lecture du capteur DHT !");
-      return;
+    // Envoi des données via ESP-NOW
+    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&espNow_moteData, sizeof(espNow_moteData));
+
+    if (result == ESP_OK) {
+      Serial.println("Données envoyées avec succès !");
+    } else {
+      Serial.println("Erreur d'envoi des données.");
     }
 
-    // Conversion et publication
-    char tempString[8];
-    dtostrf(temperature, 1, 2, tempString);
-    Serial.print("Temperature: ");
-    Serial.println(tempString);
-    client.publish("esp32/temperature", tempString);
-
-    char humString[8];
-    dtostrf(humidity, 1, 2, humString);
-    Serial.print("Humidity: ");
-    Serial.println(humString);
-    client.publish("esp32/humidity", humString);
-
-    long RangeInInches;
-    long RangeInCentimeters;
-
-    Serial.println("The distance to obstacles in front is: ");
-
-    RangeInCentimeters = ultrasonic.MeasureInCentimeters(); // two measurements should keep an interval
-    Serial.println("Distance :");
-    Serial.print(RangeInCentimeters);//0~400cm
-    Serial.println(" cm");
-  delay(250);
-
-
+    // Affichage des données dans le moniteur série
+    Serial.print("Température : ");
+    Serial.println(temperature);
+    Serial.print("Humidité : ");
+    Serial.println(humidity);
+    Serial.print("Distance : ");
+    Serial.println(distance);
   }
 }
