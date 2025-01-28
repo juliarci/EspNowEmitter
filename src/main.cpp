@@ -34,6 +34,8 @@ typedef struct struct_mote2sinkMessage {
   float temperature;
   float humidity;
   float distance;
+  bool redLedState;
+  bool yellowLedState;
   char text[64];
 } struct_mote2sinkMessage;
 
